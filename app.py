@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import subprocess
@@ -14,6 +15,26 @@ VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,20}")
 # yt-dlp ahora necesita un runtime de JavaScript (node o deno) para YouTube
 JS_RUNTIMES = {"node": {}, "deno": {}}
 
+# Si subes un archivo secreto "cookies.txt" en Render, se usa automaticamente
+COOKIES_PATH = "/etc/secrets/cookies.txt"
+
+
+def base_opts():
+    opts = {
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "quiet": True,
+        "noplaylist": True,
+        "js_runtimes": JS_RUNTIMES,
+        "remote_components": ["ejs:github"],
+    }
+    if os.path.exists(COOKIES_PATH):
+        # Se copia a /tmp porque yt-dlp intenta escribir en el archivo
+        tmp = "/tmp/cookies.txt"
+        if not os.path.exists(tmp):
+            shutil.copy(COOKIES_PATH, tmp)
+        opts["cookiefile"] = tmp
+    return opts
+
 
 @app.get("/")
 def root():
@@ -27,6 +48,7 @@ def debug():
         "yt_dlp_version": yt_dlp.version.__version__,
         "node_path": shutil.which("node"),
         "deno_path": shutil.which("deno"),
+        "cookies": os.path.exists(COOKIES_PATH),
     }
     try:
         info["node_version"] = subprocess.check_output(
@@ -40,6 +62,42 @@ def debug():
     except Exception:
         info["yt_dlp_ejs"] = "NO instalado"
     return info
+
+
+class ListLogger:
+    def __init__(self):
+        self.lines = []
+
+    def debug(self, msg):
+        self.lines.append(str(msg))
+
+    def info(self, msg):
+        self.lines.append(str(msg))
+
+    def warning(self, msg):
+        self.lines.append("WARNING: " + str(msg))
+
+    def error(self, msg):
+        self.lines.append("ERROR: " + str(msg))
+
+
+@app.get("/diag")
+def diag(id: str = "dQw4w9WgXcQ"):
+    """Muestra el log completo de yt-dlp para ver la causa real. Borralo despues."""
+    if not VIDEO_ID_RE.fullmatch(id):
+        raise HTTPException(status_code=400, detail="id invalido")
+    logger = ListLogger()
+    opts = base_opts()
+    opts["quiet"] = False
+    opts["verbose"] = True
+    opts["logger"] = logger
+    result = "ok"
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info("https://www.youtube.com/watch?v=" + id, download=False)
+    except Exception as e:
+        result = "fallo: " + str(e)
+    return {"result": result, "log": logger.lines[-60:]}
 
 
 def format_duration(seconds):
@@ -85,14 +143,7 @@ def search(q: str):
 
 
 def get_audio_url(video_id):
-    opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
-        "quiet": True,
-        "noplaylist": True,
-        "js_runtimes": JS_RUNTIMES,
-        "remote_components": ["ejs:github"],
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(base_opts()) as ydl:
         info = ydl.extract_info(
             "https://www.youtube.com/watch?v=" + video_id, download=False
         )

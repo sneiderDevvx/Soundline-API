@@ -1,66 +1,98 @@
+import re
 
-from fastapi import FastAPI, Query
-from ytmusicapi import YTMusic
+import requests
+import yt_dlp
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
-app = FastAPI(title="Soundline API")
+app = FastAPI()
 
-music = YTMusic()
+VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,20}")
+
 
 @app.get("/")
-def home():
-    return {
-        "app": "Soundline API",
-        "status": "online"
-    }
+def root():
+    return {"app": "Soundline API", "status": "online"}
+
+
+def format_duration(seconds):
+    if not seconds:
+        return ""
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return "%d:%02d:%02d" % (h, m, s)
+    return "%d:%02d" % (m, s)
+
 
 @app.get("/search")
-def search(q: str = Query(min_length=1, max_length=100)):
-
+def search(q: str):
+    q = q.strip()
+    if not q:
+        return {"success": False, "results": [], "error": "consulta vacia"}
     try:
-        results = music.search(
-            q,
-            filter="songs",
-            limit=20
-        )
+        opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "noplaylist": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info("ytsearch10:" + q, download=False)
 
-        songs = []
-
-        for item in results:
-
-            artists = item.get("artists") or []
-
-            artist_names = [
-                artist.get("name", "")
-                for artist in artists
-                if isinstance(artist, dict)
-            ]
-
-            thumbnails = item.get("thumbnails") or []
-
-            artwork = (
-                thumbnails[-1].get("url", "")
-                if thumbnails else ""
+        results = []
+        for e in info.get("entries", []):
+            if not e or not e.get("id"):
+                continue
+            results.append(
+                {
+                    "videoId": e.get("id"),
+                    "title": e.get("title") or "Sin título",
+                    "artist": e.get("uploader") or e.get("channel") or "Artista desconocido",
+                    "duration": format_duration(e.get("duration")),
+                }
             )
+        return {"success": True, "results": results}
+    except Exception as e:
+        return {"success": False, "results": [], "error": str(e)}
 
-            songs.append({
-                "videoId": item.get("videoId", ""),
-                "title": item.get("title", ""),
-                "artist": ", ".join(artist_names),
-                "album": (item.get("album") or {}).get("name", ""),
-                "duration": item.get("duration", ""),
-                "thumbnail": artwork
-            })
 
-        return {
-            "success": True,
-            "query": q,
-            "results": songs
-        }
+def get_audio_url(video_id):
+    opts = {
+        "format": "bestaudio[ext=m4a]/bestaudio",
+        "quiet": True,
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(
+            "https://www.youtube.com/watch?v=" + video_id, download=False
+        )
+    return info["url"]
 
-    except Exception as error:
-        return {
-            "success": False,
-            "error": str(error),
-            "results": []
-        }
-      
+
+@app.get("/stream")
+def stream(id: str, request: Request):
+    if not VIDEO_ID_RE.fullmatch(id):
+        raise HTTPException(status_code=400, detail="id invalido")
+    try:
+        url = get_audio_url(id)
+
+        headers = {}
+        if "range" in request.headers:
+            headers["Range"] = request.headers["range"]
+
+        r = requests.get(url, headers=headers, stream=True, timeout=20)
+
+        out_headers = {}
+        for h in ["Content-Length", "Content-Range", "Accept-Ranges"]:
+            if h in r.headers:
+                out_headers[h] = r.headers[h]
+
+        return StreamingResponse(
+            r.iter_content(65536),
+            status_code=r.status_code,
+            media_type=r.headers.get("Content-Type", "audio/mp4"),
+            headers=out_headers,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

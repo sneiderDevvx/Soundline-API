@@ -1,4 +1,6 @@
 import re
+import shutil
+import subprocess
 
 import requests
 import yt_dlp
@@ -9,10 +11,35 @@ app = FastAPI()
 
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,20}")
 
+# yt-dlp ahora necesita un runtime de JavaScript (node o deno) para YouTube
+JS_RUNTIMES = {"node": {}, "deno": {}}
+
 
 @app.get("/")
 def root():
     return {"app": "Soundline API", "status": "online"}
+
+
+@app.get("/debug")
+def debug():
+    """Borra este endpoint cuando todo funcione."""
+    info = {
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "node_path": shutil.which("node"),
+        "deno_path": shutil.which("deno"),
+    }
+    try:
+        info["node_version"] = subprocess.check_output(
+            ["node", "--version"], text=True, timeout=5
+        ).strip()
+    except Exception as e:
+        info["node_version"] = "no disponible: " + str(e)
+    try:
+        import yt_dlp_ejs  # noqa: F401
+        info["yt_dlp_ejs"] = "instalado"
+    except Exception:
+        info["yt_dlp_ejs"] = "NO instalado"
+    return info
 
 
 def format_duration(seconds):
@@ -59,9 +86,11 @@ def search(q: str):
 
 def get_audio_url(video_id):
     opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio",
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
         "quiet": True,
         "noplaylist": True,
+        "js_runtimes": JS_RUNTIMES,
+        "remote_components": ["ejs:github"],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(
